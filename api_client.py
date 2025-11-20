@@ -48,9 +48,11 @@ def _make_gemini_payload(
     user_query: str,
     model_name: str
 ) -> Dict[str, Any]:
-    """Constructs the API request payload for multimodal analysis."""
-    # The image analysis prompt is a single user message containing both the system prompt 
-    # (as context) and the image data.
+    """Constructs the API request payload for multimodal analysis.
+    
+    NOTE: The 'model_name' is handled by the URL in this client, so we do not
+    include a redundant 'config' block in the payload, which caused the 400 error.
+    """
     return {
         "contents": [
             {
@@ -67,10 +69,8 @@ def _make_gemini_payload(
                     { "text": f"SYSTEM INSTRUCTION: {system_prompt}\n\nUSER QUERY: {user_query}" }
                 ]
             }
-        ],
-        "config": {
-            "model": model_name
-        }
+        ]
+        # Removed the incorrect 'config' block which caused the API Error 400
     }
 
 
@@ -88,10 +88,9 @@ class GeminiClient:
         self.api_url = api_url or self._DEFAULT_API_URL
 
         if not self.api_key:
+            # Reraise a ValueError to be caught by app.py
             raise ValueError("API key must be provided or set as GEMINI_API_KEY environment variable.")
         
-        # NOTE: get_available_models is removed as it's not a standard Gemini feature.
-        # We will use hardcoded models in app.py.
 
     def _call_gemini(self, payload: Dict[str, Any], timeout: int = 60) -> Dict[str, Any]:
         """
@@ -99,20 +98,10 @@ class GeminiClient:
         """
         headers = {
             "Content-Type": "application/json",
-            "x-goog-api-key": self.api_key # Use key in header as recommended for security
+            # Use key in header as recommended for security
+            "x-goog-api-key": self.api_key 
         }
 
-        # The model name is embedded in the URL if the endpoint is generic, 
-        # or in the payload if the URL is model-specific. Since the default URL 
-        # above is generic, we'll ensure the payload has the model specified.
-        # However, the standard REST API uses the model name in the URL path.
-        # Let's use the URL provided in the environment variable, which should 
-        # include the model name (e.g., /v1beta/models/gemini-2.5-flash:generateContent).
-        
-        # If the user supplied a base URL without the model, use the model 
-        # from the payload to construct the full URL, or trust the default/env var URL.
-        # Given the original code's structure, we'll stick to a single URL:
-        
         full_url = self.api_url
         
         resp = requests.post(full_url, json=payload, headers=headers, timeout=timeout)
@@ -159,6 +148,7 @@ class GeminiClient:
             logger.error("Error encoding image: %s", e)
             return {"success": False, "error": f"Image encoding failed: {str(e)}"}
             
+        # Call the corrected payload function
         payload = _make_gemini_payload(base64_image, system_prompt, user_query, model_name)
 
         for attempt in range(1, max_attempts + 1):
