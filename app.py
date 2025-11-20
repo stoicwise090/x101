@@ -3,9 +3,11 @@ import time
 from PIL import Image
 import pandas as pd
 import io
+import os # Import os to check for environment variables/secrets
 
 
-from api_client import OpenRouterClient
+# Import the newly defined GeminiClient
+from api_client import GeminiClient, APIError
 from prompts import get_system_prompt
 
 
@@ -25,17 +27,18 @@ def initialize_session_state():
         st.session_state.uploaded_files = []
 
 def process_uploaded_image(uploaded_file):
-    """Process uploaded image and convert WEBP to JPEG if needed"""
+    """Process uploaded image and convert to JPEG in memory"""
     try:
         # Open image directly from uploaded file
         img = Image.open(uploaded_file)
         
-        # Convert to RGB if needed (for WEBP or other formats)
+        # Convert to RGB if needed
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
         # Save to memory buffer as JPEG
         img_buffer = io.BytesIO()
+        # Ensure the buffer is reset before reading/sending to API
         img.save(img_buffer, format='JPEG', quality=95)
         img_buffer.seek(0)
         
@@ -44,20 +47,6 @@ def process_uploaded_image(uploaded_file):
         st.error(f"Error processing image {uploaded_file.name}: {str(e)}")
         return None, None
 
-
-# def convert_webp_to_jpeg(image_path: str) -> str:
-#     """Convert WEBP image to JPEG for LLM compatibility"""
-#     try:
-#         path = Path(image_path)
-#         if path.suffix.lower() == ".webp":
-#             img = Image.open(image_path).convert("RGB")
-#             jpeg_path = str(path.with_suffix(".jpeg"))
-#             img.save(jpeg_path, "JPEG", quality=95)
-#             return jpeg_path
-#         return image_path
-#     except Exception as e:
-#         st.error(f"Error converting WEBP to JPEG: {str(e)}")
-#         return image_path
 
 def display_image_with_analysis(uploaded_file, image_size, analysis_result, index):
     """Display image alongside its analysis"""
@@ -77,7 +66,8 @@ def display_image_with_analysis(uploaded_file, image_size, analysis_result, inde
             
             # Display analysis in expandable section
             with st.expander("📋 Full Analysis", expanded=True):
-                st.write(analysis_result["analysis"])
+                # Using st.markdown to properly render potential markdown from the API response
+                st.markdown(analysis_result["analysis"]) 
             
             # Token usage info
             if analysis_result.get("tokens_used"):
@@ -135,31 +125,33 @@ def main():
     # Sidebar configuration
     st.sidebar.header("🛠️ Configuration")
     
-    # API Key input
-    # API Key input
-    # Get API key from secrets (hidden from users)
-    try:
-        api_key = st.secrets["OPENROUTER_API_KEY"]
-        if not api_key or api_key == "your_api_key_here":
-            st.sidebar.error("⚠️ API key not configured!")
-            st.error("🔧 Application configuration error. Please contact the administrator.")
-            st.stop()
-    except Exception as e:
-        st.sidebar.error("⚠️ Configuration error!")
-        st.error("🔧 Application configuration error. Please contact the administrator.")
+    # --- API Key handling for Gemini ---
+    api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+    
+    if not api_key:
+        st.sidebar.error("⚠️ Gemini API key not configured!")
+        st.error("🔧 Application configuration error. Please ensure GEMINI_API_KEY is set in secrets or environment.")
         st.stop()
-
     
     # Initialize client
-    client = OpenRouterClient(api_key)
+    try:
+        # Use the dedicated GeminiClient
+        client = GeminiClient(api_key=api_key)
+    except ValueError as e:
+        st.sidebar.error(f"Initialization Error: {e}")
+        st.error("🔧 Application configuration error. Please contact the administrator.")
+        st.stop()
     
-    # Model selection
-    available_models = client.get_available_models()
-    selected_model = st.sidebar.selectbox(
-        "🤖 Select AI Model",
-        available_models,
-        index=6,  # Default to qwen2.5-vl-32b-instruct:free
-        help="Choose the AI model for analysis"
+    # --- Model selection for direct Gemini ---
+    # Since we are using a direct client, we must specify a Gemini model that supports vision
+    GEMINI_VISION_MODEL = "gemini-2.5-flash"
+    
+    # Model display (now fixed to a single model)
+    selected_model = st.sidebar.text_input(
+        "🤖 Selected AI Model (Vision)",
+        GEMINI_VISION_MODEL,
+        disabled=True,
+        help="Using a dedicated Gemini Vision model."
     )
     
     # Task type selection
@@ -190,8 +182,9 @@ def main():
         current_file_names = [f.name for f in uploaded_files]
         session_file_names = [f["name"] for f in st.session_state.uploaded_files]
         
-        if current_file_names != session_file_names:
-            # Clear previous results if files changed
+        # Check if new files were uploaded
+        if current_file_names != session_file_names or not st.session_state.uploaded_files:
+            # Clear previous results and re-process new files
             st.session_state.analysis_results = []
             st.session_state.uploaded_files = []
             
@@ -212,7 +205,6 @@ def main():
         
         # Progress tracking
         total_files = len(st.session_state.uploaded_files)
-        completed_analyses = len([r for r in st.session_state.analysis_results if r.get("success") or r.get("error")])
         
         # Analyze all button
         if st.button("🚀 Analyze All Images", type="primary", use_container_width=True):
@@ -222,21 +214,25 @@ def main():
             # Get system prompt for selected task
             system_prompt = get_system_prompt(task_type)
             
-            # Clear previous results
+            # Reset results before starting new analysis
             st.session_state.analysis_results = []
             
             for i, file_info in enumerate(st.session_state.uploaded_files):
                 status_text.text(f"Analyzing image {i+1}/{total_files}: {file_info['name']}")
                 
                 # Perform analysis using image buffer
-                result = client.analyze_image_from_buffer(file_info["buffer"], selected_model, system_prompt)
+                result = client.analyze_image_from_buffer(
+                    image_buffer=file_info["buffer"], 
+                    model_name=selected_model, 
+                    system_prompt=system_prompt
+                )
                 st.session_state.analysis_results.append(result)
                 
                 # Update progress
                 progress_bar.progress((i + 1) / total_files)
                 
-                # Brief delay between requests
-                time.sleep(1)
+                # Brief delay between requests to be polite to the API
+                time.sleep(0.5)
             
             status_text.text("✅ All analyses complete!")
             progress_bar.progress(1.0)
@@ -267,6 +263,7 @@ def main():
             # Display individual results
             for i, (file_info, result) in enumerate(zip(st.session_state.uploaded_files, st.session_state.analysis_results)):
                 with st.container():
+                    # Pass the original Streamlit file object for display
                     display_image_with_analysis(file_info["original_file"], file_info["size"], result, i)
                     if i < len(st.session_state.uploaded_files) - 1:
                         st.divider()
@@ -278,7 +275,7 @@ def main():
     # Footer information
     st.divider()
     with st.expander("ℹ️ About this Application"):
-        st.markdown("""
+        st.markdown(f"""
         **Cattle AI Classifier** is designed to solve two key problem statements from the Ministry of Fisheries, Animal Husbandry & Dairying:
         
         1. **Problem Statement ID 25005**: Image-based Animal Type Classification for cattle and buffaloes
@@ -286,22 +283,12 @@ def main():
         
         **Features:**
         - Upload up to 10 images for batch analysis
-        - Choose from 12 free AI models via OpenRouter
+        - Uses the dedicated **Gemini Vision API** ({GEMINI_VISION_MODEL})
         - Breed recognition for Indian cattle and buffalo breeds
         - Animal type classification for breeding assessment
         - Export results to Excel format
         - Secure in-memory image processing
-        
-        **Supported Models:**
-        - Sonoma (Dusk/Sky Alpha)
-        - Mistral Small (3.1/3.2 24B)
-        - Meta Llama 4 (Maverick/Scout)
-        - Qwen 2.5 Vision (32B/72B)
-        - Google Gemma 3 (4B/12B/27B)
-        - Moonshot Kimi Vision
         """)
 
 if __name__ == "__main__":
     main()
-
-
